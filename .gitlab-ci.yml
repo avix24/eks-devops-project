@@ -1,124 +1,200 @@
-# These are available to all jobs - like global variables
+# ==============================================================
+# GLOBAL VARIABLES
+# These are available to every job in the pipeline
+# ==============================================================
 variables:
+  # This builds the full Docker image name we'll push to ECR
+  # Example result: 622833590944.dkr.ecr.ap-south-1.amazonaws.com/eks-project/podinfo:a1b2c3d4
+  #
+  # CI_COMMIT_SHORT_SHA is a built-in GitLab variable
+  # It's the first 8 characters of the git commit hash
+  # Every commit has a unique SHA so every image has a unique tag
+  # This means in 3 months you can look at any running pod and know
+  # exactly which git commit is deployed - full traceability
   DOCKER_IMAGE: $ECR_REGISTRY:$CI_COMMIT_SHORT_SHA
-  # CI_COMMIT_SHORT_SHA is a built-in GitLab variable - 
-  # it's the first 8 characters of the commit hash
-  # Example: if commit is abc123def456, tag becomes abc123de
-  # This means every commit produces a uniquely tagged image
-  # So you always know exactly which code version is running in your cluster
 
-# Three stages - build the image, test it exists, deploy it
+# ==============================================================
+# STAGES
+# Defines the order of execution
+# If build fails → test never runs
+# If test fails → deploy never runs
+# This is the safety chain - no bad image ever reaches the cluster
+# ==============================================================
 stages:
   - build
   - test
   - deploy
 
-# This runs before every job - sets up AWS authentication
-# Exactly like before_script in your Quinnox pipelines
-before_script:
-  - apt-get update -qq && apt-get install -y -qq curl unzip
-  - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-  - unzip -qq awscliv2.zip
-  - ./aws/install --quiet
-  - aws --version
-
-# ============================================================
-# STAGE 1 - BUILD
-# Build Docker image and push to ECR
-# ============================================================
+# ==============================================================
+# BUILD STAGE
+# Goal: Package our app into a Docker image and push to ECR
+# ==============================================================
 build:
   stage: build
-  image: docker:24.0
-  services:
-    # docker:dind = Docker in Docker
-    # GitLab runners don't have Docker by default
-    # This service runs a Docker daemon inside the pipeline job
-    # So your pipeline can run docker build and docker push commands
-    - docker:24.0-dind
-  variables:
-    DOCKER_TLS_CERTDIR: "/certs"
-  script:
-    # Step 1 - Login to ECR
-    # aws ecr get-login-password generates a temporary token
-    # We pipe it directly to docker login - never stored anywhere
-    - aws ecr get-login-password --region $AWS_DEFAULT_REGION | 
-      docker login --username AWS --password-stdin $ECR_REGISTRY
 
-    # Step 2 - Build the image
-    # -t tags it with our ECR registry URL + commit SHA
-    # The dot at the end means "use Dockerfile in current directory"
+  # docker:24.0 is a special image that has Docker CLI installed
+  # We need this because our script runs "docker build" and "docker push"
+  # Think of it like using a specific runner tag in your Quinnox pipelines
+  image: docker:24.0
+
+  services:
+    # Docker-in-Docker (dind) - this needs a proper explanation:
+    # GitLab pipeline jobs run INSIDE containers
+    # But to build Docker images you need a Docker daemon running
+    # You can't run a Docker daemon inside a container by default
+    # Solution: this "service" spins up a SEPARATE Docker daemon container
+    # that runs alongside your job - your job connects to it to build images
+    # Think of it as a dedicated build server running next to your pipeline
+    - docker:24.0-dind
+
+  variables:
+    # Enables TLS encryption between your job container
+    # and the Docker daemon container - security best practice
+    DOCKER_TLS_CERTDIR: "/certs"
+
+  before_script:
+    # docker:24.0 is Alpine-based so we use apk not apt-get
+    # Alpine is a tiny Linux distro used in many Docker images
+    # apk = Alpine Package Keeper (like apt for Ubuntu, yum for RHEL)
+    - apk add --no-cache curl python3 py3-pip
+
+    # Install AWS CLI so we can authenticate with ECR
+    # ECR needs AWS credentials before allowing docker push
+    # We install fresh each job because containers start clean every time
+    - pip3 install awscli --quiet --break-system-packages
+    - aws --version
+
+  script:
+    # Step 1 - Authenticate with ECR
+    # ECR doesn't use username/password like Docker Hub
+    # It uses temporary AWS tokens that expire after 12 hours
+    # aws ecr get-login-password generates a fresh token
+    # We pipe it directly into docker login - token is never saved to disk
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+    # Step 2 - Build the Docker image
+    # -t = tag, gives the image a name
+    # $DOCKER_IMAGE = full ECR URI + commit SHA
+    # The dot at the end = "find the Dockerfile in the current directory"
     - docker build -t $DOCKER_IMAGE .
 
-    # Step 3 - Push to ECR
+    # Step 3 - Push the image to ECR
+    # Image travels from the pipeline runner up to AWS ECR
+    # After this any machine with AWS access can pull this exact image
     - docker push $DOCKER_IMAGE
-    
-    # Step 4 - Also tag as latest for convenience
+
+    # Step 4 - Also push a "latest" tag pointing to same image
+    # Commit SHA tag = specific version for traceability
+    # latest tag = most recent version for convenience
+    # Same image, two different tags
     - docker tag $DOCKER_IMAGE $ECR_REGISTRY:latest
     - docker push $ECR_REGISTRY:latest
 
-  # Only run this stage on main branch pushes
-  # No point building production image from feature branches
+  # Only trigger on master branch
+  # No point building production images from feature branches
   only:
     - master
 
-# ============================================================
-# STAGE 2 - TEST
-# Verify the image we just pushed actually exists in ECR
-# Simple but important - catches push failures before deploy
-# ============================================================
+# ==============================================================
+# TEST STAGE
+# Goal: Verify the image actually landed in ECR before deploying
+# Why? A push can silently fail sometimes
+# Better to catch it here than discover it mid-deployment
+# ==============================================================
 verify:
   stage: test
+
+  # python:3.11-slim is Debian-based so apt-get works here
+  # We use a different base image per job based on what tools we need
+  # This is why we can't use a global before_script - each image
+  # has a different package manager (apk vs apt-get vs yum)
+  image: python:3.11-slim
+
+  before_script:
+    # Debian/Ubuntu uses apt-get for package installation
+    - apt-get update -qq && apt-get install -y -qq curl unzip
+
+    # Install AWS CLI the official way for Debian
+    # Different from Alpine where we used pip
+    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+    - unzip -qq awscliv2.zip
+    - ./aws/install --quiet
+
   script:
-    - aws ecr describe-images 
-      --repository-name eks-project/podinfo 
-      --image-ids imageTag=$CI_COMMIT_SHORT_SHA
-      --region $AWS_DEFAULT_REGION
-    - echo "Image $DOCKER_IMAGE verified in ECR"
+    # Ask ECR: "does this specific image tag exist?"
+    # --image-ids imageTag=$CI_COMMIT_SHORT_SHA checks for our exact commit
+    # If image doesn't exist this command returns an error and pipeline fails
+    # This is a gate - deploy stage only runs if this passes
+    - aws ecr describe-images --repository-name eks-project/podinfo --image-ids imageTag=$CI_COMMIT_SHORT_SHA --region $AWS_DEFAULT_REGION
+    - echo "Image $DOCKER_IMAGE verified in ECR - safe to deploy"
+
   only:
     - master
 
-# ============================================================
-# STAGE 3 - DEPLOY
-# Update the running cluster with the new image
-# ============================================================
+# ==============================================================
+# DEPLOY STAGE
+# Goal: Update the running EKS cluster with the new image
+# This is the "helm upgrade" you were running manually before
+# Now it runs automatically after every verified push
+# ==============================================================
 deploy:
   stage: deploy
+
+  # Alpine is a tiny Linux image - starts fast, less waiting
+  # We install kubectl and helm inside it in before_script
   image: alpine:3.18
-  script:
-    # Install kubectl - the tool to talk to Kubernetes
+
+  before_script:
+    # Install dependencies
+    # bash and openssl are needed by the helm install script
+    - apk add --no-cache curl python3 py3-pip bash openssl
+
+    # Install AWS CLI via pip on Alpine
+    - pip3 install awscli --quiet --break-system-packages
+
+    # Install kubectl - the command line tool to talk to Kubernetes
+    # Same kubectl you use on your laptop, now running inside the pipeline
+    # v1.29.0 matches our EKS cluster version - always match these
     - curl -LO "https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl"
-    - chmod +x kubectl
-    - mv kubectl /usr/local/bin/
+    - chmod +x kubectl && mv kubectl /usr/local/bin/
+    - kubectl version --client
 
-    # Install Helm
-    - curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sh
+    # Install Helm - same helm you used manually in Phase 3
+    - curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    - helm version
 
-    # Configure kubectl to talk to our EKS cluster
-    # Same command you ran manually before - now automated
-    - aws eks update-kubeconfig 
-      --region $AWS_DEFAULT_REGION 
-      --name $EKS_CLUSTER_NAME
+    # Connect kubectl to your EKS cluster
+    # This is the exact same command you run manually at session start
+    # Now it runs automatically inside the pipeline
+    # AWS CLI uses $AWS_ACCESS_KEY_ID and $AWS_SECRET_ACCESS_KEY
+    # from your GitLab CI/CD variables to authenticate
+    - aws eks update-kubeconfig --region $AWS_DEFAULT_REGION --name $EKS_CLUSTER_NAME
 
-    # The money shot - upgrade the running deployment with new image
-    # helm upgrade [release-name] [chart-path] [flags]
-    # --set image.tag overrides the tag in values.yaml with the new commit SHA
-    # --install means "install if not exists, upgrade if exists"
-    # --wait means "wait until pods are healthy before marking success"
-    # --timeout 5m means "if pods aren't healthy in 5 minutes, fail the pipeline"
-    - helm upgrade podinfo ./helm/podinfo
-      --namespace podinfo
-      --set image.tag=$CI_COMMIT_SHORT_SHA
-      --set image.repository=$ECR_REGISTRY
-      --install
-      --wait
-      --timeout 5m
+  script:
+    # THE KEY COMMAND - helm upgrade
+    # Breaking down every single flag:
+    #
+    # podinfo                    = release name (same name used in helm install)
+    # ./helm/podinfo             = path to your helm chart inside the repo
+    # --namespace podinfo        = deploy into the podinfo namespace
+    # --set image.repository=... = override image repo in values.yaml
+    #                              uses ECR instead of Docker Hub
+    # --set image.tag=...        = override image tag in values.yaml
+    #                              uses this commit's SHA - exact version control
+    # --install                  = if release doesn't exist install it fresh
+    #                              if it exists upgrade it - safe either way
+    # --wait                     = don't mark job SUCCESS until pods are healthy
+    #                              without this pipeline passes even if pods crash
+    # --timeout 5m               = if pods not healthy in 5 min, fail the pipeline
+    #                              prevents pipeline hanging forever
+    - helm upgrade podinfo ./helm/podinfo --namespace podinfo --set image.repository=$ECR_REGISTRY --set image.tag=$CI_COMMIT_SHORT_SHA --install --wait --timeout 5m
+    - echo "Successfully deployed $DOCKER_IMAGE to $EKS_CLUSTER_NAME"
 
-    - echo "Deployed image $DOCKER_IMAGE to EKS cluster $EKS_CLUSTER_NAME"
+  # needs = "only run this job after verify job passes"
+  # Extra safety gate - deploy only if image verification succeeded
+  # Without this, deploy could run in parallel with verify
+  needs:
+    - verify
 
   only:
     - master
-
-  # This means deploy only runs AFTER verify passes
-  # If image verification fails, we never attempt deployment
-  needs:
-    - verify
