@@ -59,7 +59,7 @@ build:
   # Only run this stage on main branch pushes
   # No point building production image from feature branches
   only:
-    - main
+    - master
 
 # ============================================================
 # STAGE 2 - TEST
@@ -75,7 +75,7 @@ verify:
       --region $AWS_DEFAULT_REGION
     - echo "Image $DOCKER_IMAGE verified in ECR"
   only:
-    - main
+    - master
 
 # ============================================================
 # STAGE 3 - DEPLOY
@@ -116,7 +116,7 @@ deploy:
     - echo "Deployed image $DOCKER_IMAGE to EKS cluster $EKS_CLUSTER_NAME"
 
   only:
-    - main
+    - master
 
   # This means deploy only runs AFTER verify passes
   # If image verification fails, we never attempt deployment
