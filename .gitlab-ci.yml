@@ -186,7 +186,7 @@ deploy:
     # --wait                     = don't mark job SUCCESS until pods are healthy
     #                              without this pipeline passes even if pods crash
     # --timeout 5m               = if pods not healthy in 5 min, fail the pipeline
-    #                              prevents pipeline hanging forever
+    #                              prevents pipeline hanging forever 
     - helm upgrade podinfo ./helm/podinfo --namespace podinfo --set image.repository=$ECR_REGISTRY --set image.tag=$CI_COMMIT_SHORT_SHA --install --wait --timeout 5m
     - echo "Successfully deployed $DOCKER_IMAGE to $EKS_CLUSTER_NAME"
 
