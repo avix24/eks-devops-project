@@ -1,0 +1,81 @@
+# ==============================================================
+# SERVICEACCOUNT
+# An identity for processes that run in a pod
+# or for humans/tools that need cluster access
+# Think of it as an employee ID card
+# ==============================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  # Name of this identity
+  name: {{ .Release.Name }}-viewer
+  # Which namespace this identity lives in
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+
+---
+# ==============================================================
+# ROLE
+# Defines what actions are allowed
+# This is a NAMESPACED role - only applies to podinfo namespace
+# For cluster-wide permissions you'd use ClusterRole instead
+# ==============================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-viewer-role
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+rules:
+  # Each rule has three parts:
+  # apiGroups - which API group the resource belongs to
+  # resources - which Kubernetes objects this rule applies to
+  # verbs - what actions are allowed on those objects
+
+  - apiGroups: [""]
+    # "" means the core API group - pods, services, configmaps live here
+    resources: ["pods", "services", "configmaps", "endpoints"]
+    # get = read one specific resource
+    # list = read all resources of this type
+    # watch = stream real-time updates (like kubectl get pods -w)
+    # NO create, update, delete, patch = read only
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["apps"]
+    # apps group contains deployments, replicasets, daemonsets
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: ["autoscaling"]
+    # autoscaling group contains HPA
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ==============================================================
+# ROLEBINDING
+# Connects the ServiceAccount (who) to the Role (what they can do)
+# Without this the ServiceAccount exists but has zero permissions
+# Like having an employee ID card that hasn't been programmed yet
+# ==============================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-viewer-binding
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+roleRef:
+  # This points to the Role we created above
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-viewer-role
+subjects:
+  # This is the list of WHO gets these permissions
+  # kind: ServiceAccount means we're giving permissions to a ServiceAccount
+  # You could also use kind: User or kind: Group for human access
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-viewer
+    namespace: {{ .Release.Namespace }}
