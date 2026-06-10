@@ -1,0 +1,39 @@
+name: EKS CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - feature/github-actions-cicd
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: eks-devops-app
+  EKS_CLUSTER_NAME: eks-devops-cluster
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+
+  build:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+  verify:
+    name: Security scan
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Placeholder
+        run: echo "Verify stage - coming in Step 4"
+
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: [build, verify]
+    steps:
+      - name: Placeholder
+        run: echo "Deploy stage - coming in Step 5"
