@@ -9,8 +9,8 @@ on:
 
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  ECR_REPOSITORY: eks-devops-app
-  EKS_CLUSTER_NAME: eks-devops-cluster
+  ECR_REPOSITORY: eks-project/podinfo
+  EKS_CLUSTER_NAME: eks-project-dev
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
