@@ -183,6 +183,9 @@ jobs:
       # --set image.tag uses full SHA here (GitHub doesn't auto-shorten)
       - name: Deploy to EKS via Helm
         run: |
+          # Create namespace if it doesn't exist
+          kubectl create namespace podinfo --dry-run=client -o yaml | kubectl apply -f -
+          
           helm upgrade podinfo ./helm/podinfo \
             --namespace podinfo \
             --set image.repository=$ECR_REGISTRY/$ECR_REPOSITORY \
