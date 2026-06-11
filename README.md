@@ -23,9 +23,9 @@ Manually deploying applications on Kubernetes leads to:
 
 ## 🏗️ Architecture
 ```
-Developer → GitLab
+Developer → GitHub
                 ↓
-          CI/CD Pipeline
+          GitHub Actions Pipeline
           ├── Build: Docker image → AWS ECR
           ├── Verify: Image exists in ECR
           └── Deploy: Helm upgrade → AWS EKS
@@ -51,7 +51,7 @@ Developer → GitLab
 | Infrastructure as Code | Terraform (Modular) |
 | Containerization | Docker |
 | Orchestration | Kubernetes, Helm |
-| CI/CD | GitLab CI/CD |
+| CI/CD | GitHub Actions |
 | Monitoring | Prometheus, Grafana |
 | Security | RBAC, AWS IAM |
 
@@ -77,8 +77,10 @@ eks-project/
 │           ├── configmap.yaml
 │           ├── hpa.yaml
 │           └── rbac.yaml
+├── .github/
+│   └── workflows/
+│       └── deploy.yml  # GitHub Actions pipeline
 ├── images/             # Project screenshots
-├── .gitlab-ci.yml      # CI/CD pipeline
 └── Dockerfile
 ```
 
@@ -93,14 +95,15 @@ eks-project/
 - Custom VPC with public/private subnets across 2 availability zones
 - EKS worker nodes in private subnets (security best practice)
 - NAT Gateway for secure outbound internet access
+- IAM Access Entries for fine-grained cluster authentication
 
-### 🚀 CI/CD Pipeline (GitLab)
-Three-stage automated pipeline triggered on every commit:
+### 🚀 CI/CD Pipeline (GitHub Actions)
+Three-job automated pipeline triggered on every push to master:
 - **Build** — Docker image built and pushed to ECR with commit SHA tag
 - **Verify** — Confirms image exists in ECR before deployment
 - **Deploy** — Helm upgrade with zero-downtime rolling update
 
-![GitLab Pipeline](images/Pipeline.png)
+![GitHub Actions Pipeline](images/Pipeline.png)
 
 ### ☸️ Application Deployment (Helm)
 - Custom Helm chart with parameterized values
@@ -156,12 +159,19 @@ Three-stage automated pipeline triggered on every commit:
   default on EKS. Installed separately. Learned EKS doesn't include it
   out of the box.
 
-- **GitLab pipeline build stage failed** — Alpine Linux + Python 3.12
-  pyexpat conflict. Fixed by switching to GitLab's official aws-base
-  image with non-TLS Docker daemon connection.
+- **GitHub Actions deploy stage failed** — EKS cluster authentication
+  mode was set to CONFIG_MAP only. Fixed by updating Terraform to use
+  API_AND_CONFIG_MAP mode and adding IAM Access Entry for the deployment
+  user. Learned that EKS by default only trusts the IAM identity that
+  created the cluster.
 
-- **Git push rejected** — remote was ahead of local after editing
-  pipeline in GitLab UI. Fixed with git pull before push.
+- **GitHub Actions build stage failed** — Alpine Linux + Python 3.12
+  pyexpat conflict when installing AWS CLI via pip. Fixed by using
+  GitLab's official aws-base image with direct binary installation.
+
+- **Namespace not found during deployment** — Fresh cluster had no
+  podinfo namespace. Fixed by adding idempotent namespace creation
+  in pipeline using --dry-run=client pattern.
 
 ---
 
@@ -172,17 +182,27 @@ Three-stage automated pipeline triggered on every commit:
 - Terraform >= 1.0
 - kubectl
 - Helm >= 3.0
-- GitLab account with CI/CD variables configured
+- GitHub account with Actions secrets configured
 
 ### 1️⃣ AWS Setup (One time manual steps)
 ```bash
 # Create S3 bucket for remote state
 # Create DynamoDB table for state locking
 # Create ECR repository: eks-project/podinfo
-# Configure GitLab CI/CD variables
+# Add GitHub Actions secrets (see below)
 ```
 
-### 2️⃣ Provision Infrastructure
+### 2️⃣ GitHub Actions Secrets Required
+| Secret | Description |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | IAM user access key |
+| `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
+| `AWS_REGION` | ap-south-1 |
+| `ECR_REGISTRY` | Your ECR registry URL |
+| `ECR_REPOSITORY` | eks-project/podinfo |
+| `EKS_CLUSTER_NAME` | eks-project-dev |
+
+### 3️⃣ Provision Infrastructure
 ```bash
 cd terraform/environments/dev
 terraform init
@@ -190,27 +210,23 @@ terraform plan
 terraform apply
 ```
 
-### 3️⃣ Configure kubectl
+### 4️⃣ Configure kubectl
 ```bash
 aws eks update-kubeconfig --region ap-south-1 --name eks-project-dev
 kubectl get nodes
 ```
 
-### 4️⃣ Install Metrics Server
+### 5️⃣ Install Metrics Server
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
 ```
 
-### 5️⃣ Create Namespace
-```bash
-kubectl create namespace podinfo
-```
-
 ### 6️⃣ Trigger Pipeline
-Push any change to GitLab master branch — pipeline automatically:
-- Builds Docker image
+Push any change to master branch — GitHub Actions automatically:
+- Builds Docker image with commit SHA tag
 - Pushes to ECR
-- Deploys to EKS via Helm
+- Verifies image exists
+- Deploys to EKS via Helm upgrade
 
 ### 7️⃣ Setup Monitoring
 ```bash
