@@ -169,12 +169,15 @@ jobs:
         run: |
           aws eks update-kubeconfig \
             --region $AWS_REGION \
-            --name $EKS_CLUSTER_NAME
+            --name $EKS_CLUSTER_NAME \
+            --alias eks-cluster
 
-          # Explicitly update token - fixes credential issue with GitHub Actions
-          kubectl config set-credentials $(kubectl config current-context) \
-            --token=$(aws eks get-token --cluster-name $EKS_CLUSTER_NAME --region $AWS_REGION | python3 -c "import sys,json; print(json.load(sys.stdin)['status']['token'])")
 
+      # Verify Cluster conection
+      - name: Verify cluster connection
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
       # The money shot - helm upgrade
       # Exact same command as GitLab pipeline
       # --set image.tag uses full SHA here (GitHub doesn't auto-shorten)
