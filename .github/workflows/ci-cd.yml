@@ -10,8 +10,7 @@ name: Build and Deploy to EKS
 on:
   push:
     branches:
-      - main
-      - feature/github-actions-cicd
+      - master
   workflow_dispatch:
 
 # Environment variables available to ALL jobs
