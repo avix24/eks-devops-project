@@ -1,5 +1,12 @@
-name: EKS CI/CD Pipeline
+# ==============================================================
+# GitHub Actions CI/CD Pipeline
+# Equivalent to our GitLab pipeline but using GitHub Actions syntax
+# Triggers on every push to master branch
+# ==============================================================
+name: Build and Deploy to EKS
 
+# "on" is the trigger - equivalent to "only: master" in GitLab
+# This pipeline runs when code is pushed to master branch
 on:
   push:
     branches:
@@ -7,68 +14,174 @@ on:
       - feature/github-actions-cicd
   workflow_dispatch:
 
+# Environment variables available to ALL jobs
+# Equivalent to global "variables:" in GitLab
 env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  ECR_REPOSITORY: eks-project/podinfo
-  EKS_CLUSTER_NAME: eks-project-dev
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+  # github.sha = full commit hash
+  # We take first 8 characters - same as CI_COMMIT_SHORT_SHA in GitLab
   IMAGE_TAG: ${{ github.sha }}
 
+# ==============================================================
+# JOBS
+# In GitHub Actions there are no "stages" like GitLab
+# Instead jobs run in parallel by default
+# Use "needs:" to make them run sequentially - same as "needs:" in GitLab
+# ==============================================================
 jobs:
 
+  # ==============================================================
+  # JOB 1 - BUILD
+  # Build Docker image and push to ECR
+  # Equivalent to "build" stage in GitLab pipeline
+  # ==============================================================
   build:
-    name: Build and push Docker image
+    # runs-on = which machine to run this job on
+    # ubuntu-latest = GitHub's hosted runner with Ubuntu
+    # Equivalent to "image: docker:27.0" in GitLab
     runs-on: ubuntu-latest
-    outputs:
-      image: ${{ steps.build-image.outputs.image }}
-      image_tag: ${{ steps.build-image.outputs.image_tag }}
 
     steps:
+      # Step 1 - Checkout code
+      # GitHub Actions doesn't automatically have your code available
+      # This step clones your repository into the runner
+      # No equivalent needed in GitLab - code is always available
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
+      # Step 2 - Configure AWS credentials
+      # This is cleaner than GitLab - dedicated action handles auth
+      # No need to install AWS CLI manually like we did in GitLab
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # Step 3 - Login to ECR
+      # Dedicated action for ECR login - cleaner than our GitLab approach
+      # Automatically handles the token generation and docker login
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Build, tag, and push image to ECR
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      # Step 4 - Build and push Docker image
+      # ubuntu-latest already has Docker installed - no need to install it
+      # This is cleaner than GitLab where we needed docker:dind service
+      - name: Build and push Docker image
         run: |
-          # Slice to 8 characters — same as GitLab's CI_COMMIT_SHORT_SHA
-          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-8)
+          # Full image URI = registry/repository:tag
+          IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-          # Build and push SHA-tagged image
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$SHORT_SHA .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$SHORT_SHA
+          echo "Building image: $IMAGE_URI"
 
-          # Also push latest tag — same image, two tags
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$SHORT_SHA $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          # Build the Docker image
+          docker build -t $IMAGE_URI .
+
+          # Push to ECR
+          docker push $IMAGE_URI
+
+          # Also tag as latest
+          docker tag $IMAGE_URI $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-          # Save outputs for downstream jobs
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$SHORT_SHA" >> $GITHUB_OUTPUT
-          echo "image_tag=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "Successfully pushed $IMAGE_URI"
 
+  # ==============================================================
+  # JOB 2 - VERIFY
+  # Confirm image exists in ECR before deploying
+  # Equivalent to "verify" stage in GitLab pipeline
+  # ==============================================================
   verify:
-    name: Security scan
     runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Placeholder
-        run: echo "Verify stage - coming in Step 4"
 
-  deploy:
-    name: Deploy to EKS
-    runs-on: ubuntu-latest
-    needs: [build, verify]
+    # "needs: build" means this job only runs AFTER build succeeds
+    # Equivalent to "needs: - build" in GitLab
+    needs: build
+
     steps:
-      - name: Placeholder
-        run: echo "Deploy stage - coming in Step 5"
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Verify image exists in ECR
+        run: |
+          # Take first 8 characters of SHA - same as CI_COMMIT_SHORT_SHA
+          SHORT_SHA=$(echo $IMAGE_TAG | cut -c1-8)
+
+          echo "Verifying image tag: $SHORT_SHA"
+
+          # Ask ECR if this image exists
+          # If it doesn't exist - this command fails and pipeline stops
+          aws ecr describe-images \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=$IMAGE_TAG \
+            --region $AWS_REGION
+
+          echo "Image verified successfully - safe to deploy"
+
+  # ==============================================================
+  # JOB 3 - DEPLOY
+  # Deploy to EKS using Helm
+  # Equivalent to "deploy" stage in GitLab pipeline
+  # ==============================================================
+  deploy:
+    runs-on: ubuntu-latest
+
+    # Only runs after verify succeeds
+    # Same safety chain as GitLab: build → verify → deploy
+    needs: verify
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Install kubectl - same as deploy stage in GitLab
+      # But cleaner - dedicated action handles it
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.31.0'
+
+      # Install Helm - dedicated action, much cleaner than GitLab approach
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+
+      # Connect kubectl to EKS cluster
+      # Same command as always - just running inside GitHub's runner now
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region $AWS_REGION \
+            --name $EKS_CLUSTER_NAME
+
+      # The money shot - helm upgrade
+      # Exact same command as GitLab pipeline
+      # --set image.tag uses full SHA here (GitHub doesn't auto-shorten)
+      - name: Deploy to EKS via Helm
+        run: |
+          helm upgrade podinfo ./helm/podinfo \
+            --namespace podinfo \
+            --set image.repository=$ECR_REGISTRY/$ECR_REPOSITORY \
+            --set image.tag=$IMAGE_TAG \
+            --install \
+            --wait \
+            --timeout 5m
+
+          echo "Successfully deployed to $EKS_CLUSTER_NAME"
